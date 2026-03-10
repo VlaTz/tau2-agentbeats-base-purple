@@ -1,8 +1,8 @@
-# A2A Agent Template
+# Tau2 Purple Agent
 
-A minimal template for building [A2A (Agent-to-Agent)](https://a2a-protocol.org/latest/) agents.
+Baseline purple agent for the [tau2-bench](https://github.com/sierra-research/tau2-bench) customer service benchmark on [AgentBeats](https://agentbeats.dev). Uses [litellm](https://docs.litellm.ai/) to call any supported LLM provider.
 
-## Project Structure
+During evaluation, the [green agent](https://github.com/RDI-Foundation/green-agent-template) sends customer service tasks via the [A2A protocol](https://a2a-protocol.org/latest/). This agent receives each task, uses the provided tools and policy to resolve it, and returns a JSON response.
 
 ```
 src/
@@ -33,6 +33,14 @@ amber-manifest.json5  # Amber manifest
 5. **Write your tests** - Add custom tests for your agent in [`tests/test_agent.py`](tests/test_agent.py)
 
 For a concrete example of implementing an agent using this template, see this [draft PR](https://github.com/RDI-Foundation/agent-template/pull/8).
+## Configuration
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `AGENT_LLM` | `openai/gpt-4o-mini` | LLM model in [litellm format](https://docs.litellm.ai/docs/providers) |
+| `OPENAI_API_KEY` | — | Required if using OpenAI models |
+| `GEMINI_API_KEY` | — | Required if using Gemini models |
+| `DEEPSEEK_API_KEY` | — | Required if using DeepSeek models |
 
 ## Running Locally
 
@@ -41,50 +49,53 @@ For a concrete example of implementing an agent using this template, see this [d
 uv sync
 
 # Run the server
-uv run src/server.py
+AGENT_LLM=openai/gpt-4o-mini OPENAI_API_KEY=sk-... uv run src/server.py
 ```
 
 ## Running with Docker
 
 ```bash
 # Build the image
-docker build -t my-agent .
+docker build -t tau2-purple-agent .
 
 # Run the container
-docker run -p 9009:9009 my-agent
+docker run -p 9009:9009 \
+  -e AGENT_LLM=openai/gpt-4o-mini \
+  -e OPENAI_API_KEY=sk-... \
+  tau2-purple-agent
 ```
 
-## Testing
+## Amber Scenario
 
-Run A2A conformance tests against your agent.
+This agent includes an [Amber](https://github.com/RDI-Foundation/amber) manifest at [`amber/amber-manifest.json5`](amber/amber-manifest.json5) for use in the AgentBeats quick-submit flow.
+
+### Validate the manifest
+
+```bash
+docker run --rm -v "$PWD":/work -w /work \
+  ghcr.io/rdi-foundation/amber-cli:main check amber/amber-manifest.json5
+```
+
+### Run as part of a scenario
+
+The green agent's repo contains the full scenario file that wires this purple agent to the gateway and green agent. See the [green agent amber directory](https://github.com/RDI-Foundation/green-agent-template/tree/main/amber) for the scenario manifest and instructions.
+
+To submit via quick-submit, use the form on the green agent's [AgentBeats page](https://agentbeats.dev). The scenario builder will reference this agent's manifest URL and pass in the configured `AGENT_LLM` and API keys.
+
+## Testing
 
 ```bash
 # Install test dependencies
 uv sync --extra test
 
-# Start your agent (uv or docker; see above)
-
-# Run tests against your running agent URL
+# Start the agent, then run A2A conformance tests
 uv run pytest --agent-url http://localhost:9009
 ```
 
 ## Publishing
 
-The repository includes a GitHub Actions workflow that automatically builds, tests, and publishes a Docker image of your agent to GitHub Container Registry.
+The included GitHub Actions workflow builds, tests, and publishes a Docker image to GitHub Container Registry on push to `main`:
 
-If your agent needs API keys or other secrets, add them in Settings → Secrets and variables → Actions → Repository secrets. They'll be available as environment variables during CI tests.
-
-- **Push to `main`** → publishes `latest` tag:
 ```
-ghcr.io/<your-username>/<your-repo-name>:latest
+ghcr.io/rdi-foundation/tau2-purple-agentbeats:latest
 ```
-
-- **Create a git tag** (e.g. `git tag v1.0.0 && git push origin v1.0.0`) → publishes version tags:
-```
-ghcr.io/<your-username>/<your-repo-name>:1.0.0
-ghcr.io/<your-username>/<your-repo-name>:1
-```
-
-Once the workflow completes, find your Docker image in the Packages section (right sidebar of your repository). Configure the package visibility in package settings.
-
-> **Note:** Organization repositories may need package write permissions enabled manually (Settings → Actions → General). Version tags must follow [semantic versioning](https://semver.org/) (e.g., `v1.0.0`).
