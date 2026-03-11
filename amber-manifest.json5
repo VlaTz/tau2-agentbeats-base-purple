@@ -4,9 +4,9 @@
     type: "object",
     properties: {
       agent_llm: { type: "string" },
-      openai_api_key: { type: "string", secret: true },
-      gemini_api_key: { type: "string", secret: true },
-      deepseek_api_key: { type: "string", secret: true },
+      openai_api_key: { type: "string", secret: true, default: "" },
+      gemini_api_key: { type: "string", secret: true, default: "" },
+      deepseek_api_key: { type: "string", secret: true, default: "" },
     },
     required: ["agent_llm"],
     additionalProperties: false,
