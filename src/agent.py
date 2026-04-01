@@ -260,11 +260,13 @@ async def call_llm_with_retry(
     model: str,
     response_format: dict[str, Any],
     temperature: float | None,
+    reasoning_effort: str | None,
     max_output_tokens: int | None,
     max_retries: int = 5,
     backoff_base: int = 2,
 ):
-
+    if reasoning_effort:
+        logger.info("Ignoring reasoning_effort=%s because OpenAI-compatible chat completions do not use it here", reasoning_effort)
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -422,6 +424,7 @@ class Agent:
         self.max_retries = int(os.getenv("AGENT_LLM_MAX_RETRIES", "5"))
         self.backoff_base = int(os.getenv("AGENT_LLM_BACKOFF_BASE", "2"))
         self.temperature = DEFAULT_TEMPERATURE
+        self.reasoning_effort = None
         self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
         self.state: ConversationState | None = None
 
@@ -470,6 +473,7 @@ class Agent:
                 model=self.model,
                 response_format={"type": "json_object"},
                 temperature=self.temperature,
+                reasoning_effort=self.reasoning_effort,
                 max_output_tokens=self.max_output_tokens,
                 max_retries=self.max_retries,
                 backoff_base=self.backoff_base,
