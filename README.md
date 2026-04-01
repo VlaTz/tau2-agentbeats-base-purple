@@ -1,6 +1,6 @@
 # Tau2 Purple Agent
 
-Baseline purple agent for the [tau2-bench](https://github.com/sierra-research/tau2-bench) customer service benchmark on [AgentBeats](https://agentbeats.dev). Uses [litellm](https://docs.litellm.ai/) to call any supported LLM provider.
+Baseline purple agent for the [tau2-bench](https://github.com/sierra-research/tau2-bench) customer service benchmark on [AgentBeats](https://agentbeats.dev). Uses the [OpenAI Python SDK](https://github.com/openai/openai-python) against OpenAI-compatible APIs, so you can switch providers through model name, API base URL, and API key.
 
 During evaluation, the [green agent](https://github.com/RDI-Foundation/green-agent-template) sends customer service tasks via the [A2A protocol](https://a2a-protocol.org/latest/). This agent receives each task, uses the provided tools and policy to resolve it, and returns a JSON response.
 
@@ -37,10 +37,33 @@ For a concrete example of implementing an agent using this template, see this [d
 
 | Environment Variable | Default | Description |
 |---|---|---|
-| `AGENT_LLM` | `openai/gpt-4o-mini` | LLM model in [litellm format](https://docs.litellm.ai/docs/providers) |
+| `AGENT_LLM` | `openai/gpt-4o-mini` | Model name for an OpenAI-compatible provider. Both `openai/gpt-4o-mini` and raw model IDs are accepted. |
+| `OPENAI_API_BASE` | empty | Optional OpenAI-compatible base URL, useful for providers like NVIDIA |
 | `OPENAI_API_KEY` | — | Required if using OpenAI models |
-| `GEMINI_API_KEY` | — | Required if using Gemini models |
-| `DEEPSEEK_API_KEY` | — | Required if using DeepSeek models |
+
+## Agent Behavior
+
+This repo now implements a lightweight `custom` purple-agent scaffold instead of a one-shot baseline:
+
+- The first tau2 turn is parsed into `policy`, `tools`, and initial user messages.
+- The agent keeps compact per-conversation state: confirmed facts, pending questions, blocked reasons, and recent transcript.
+- Each turn is routed through a decision controller that chooses exactly one next action:
+  - a tool call, or
+  - `respond` with a short clarification / completion message.
+- The final outward response is always normalized back into the tau2 JSON action shape:
+
+```json
+{"name": "respond", "arguments": {"content": "Please confirm the phone number on the account."}}
+```
+
+The controller is explicitly optimized for:
+
+- policy-first behavior,
+- clarification-before-commit,
+- shared-control awareness,
+- conservative claims about completed actions.
+
+The controller's internal tuning is fixed in code, so the external runtime configuration stays minimal for AgentBeats submissions.
 
 ## Running Locally
 
@@ -50,6 +73,17 @@ uv sync
 
 # Run the server
 AGENT_LLM=openai/gpt-4o-mini OPENAI_API_KEY=sk-... uv run src/server.py
+```
+
+You can also use a local `.env` file. `src/server.py` now calls `load_dotenv()`, so gitignored secrets are loaded automatically on startup.
+
+Example for an OpenAI-compatible NVIDIA endpoint:
+
+```bash
+AGENT_LLM=openai/gpt-oss-120b \
+OPENAI_API_BASE=https://integrate.api.nvidia.com/v1 \
+OPENAI_API_KEY=nvapi-... \
+uv run src/server.py
 ```
 
 ## Running with Docker
@@ -82,6 +116,12 @@ The green agent's repo contains the full scenario file that wires this purple ag
 
 To submit via quick-submit, use the form on the green agent's [AgentBeats page](https://agentbeats.dev). The scenario builder will reference this agent's manifest URL and pass in the configured `AGENT_LLM` and API keys.
 
+For this repo's purple-agent manifest, the only external runtime fields you need in Quick Submit are:
+
+- `AGENT_LLM`
+- `OPENAI_API_BASE`
+- `OPENAI_API_KEY`
+
 ## Testing
 
 ```bash
@@ -91,6 +131,16 @@ uv sync --extra test
 # Start the agent, then run A2A conformance tests
 uv run pytest --agent-url http://localhost:9009
 ```
+
+The test suite now includes:
+
+- A2A card / message conformance checks
+- tau2-style contract parsing checks
+- scenario tests for clarification, policy blocking, valid tool calls, and malformed controller output
+
+## Evaluation Notes
+
+`tau2-bench` leaderboard submissions distinguish between `standard` and `custom` scaffolds. Because this agent now uses a dedicated decision controller and custom prompts/control flow, you should document it as a `custom` submission when preparing leaderboard metadata. See the public tau2 leaderboard submission guide for the exact schema and verification rules.
 
 ## Publishing
 

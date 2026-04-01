@@ -1,10 +1,17 @@
+import json
+import sys
+from pathlib import Path
 from typing import Any
-import pytest
-import httpx
 from uuid import uuid4
+
+import httpx
+import pytest
 
 from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from a2a.types import Message, Part, Role, TextPart
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import agent as purple_agent
 
 
 # A2A validation helpers - adapted from https://github.com/a2aproject/a2a-inspector/blob/main/backend/validators.py
@@ -196,4 +203,227 @@ async def test_message(agent, streaming):
     assert events, "Agent should respond with at least one event"
     assert not all_errors, f"Message validation failed:\n" + "\n".join(all_errors)
 
-# Add your custom tests here
+
+class DummyUpdater:
+    def __init__(self):
+        self.artifacts = []
+
+    async def add_artifact(self, parts, name):
+        self.artifacts.append({"parts": parts, "name": name})
+
+    def last_text(self) -> str:
+        return self.artifacts[-1]["parts"][0].root.text
+
+
+class FakeChoice:
+    def __init__(self, content: str):
+        self.message = type("FakeMessage", (), {"content": content})()
+
+
+class FakeResponse:
+    def __init__(self, content: str):
+        self.choices = [FakeChoice(content)]
+
+
+def make_message(text: str, context_id: str = "ctx-test") -> Message:
+    return Message(
+        kind="message",
+        role=Role.user,
+        parts=[Part(root=TextPart(text=text))],
+        message_id=uuid4().hex,
+        context_id=context_id,
+    )
+
+
+def sample_tau2_prompt() -> str:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_account",
+                "description": "Look up the customer account after identity verification.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "phone_number": {"type": "string"},
+                    },
+                    "required": ["phone_number"],
+                },
+            },
+        }
+    ]
+    respond_tool = {
+        "type": "function",
+        "function": {
+            "name": "respond",
+            "description": "Respond directly to the user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                },
+                "required": ["content"],
+            },
+        },
+    }
+    return f"""You are helping with telecom support.
+- Never change plans before verifying the customer identity.
+- Ask for clarification before any irreversible action.
+
+Here's a list of tools you can use (you can use at most one tool at a time):
+{json.dumps(tools, indent=2)}
+
+Additionally, you can respond with the following call:
+{json.dumps(respond_tool, indent=2)}
+
+Please respond in JSON format.
+The JSON should contain:
+- "name": the tool call function name.
+- "arguments": the arguments for the tool call.
+
+Now here are the user messages:
+I want to change my mobile plan today.
+"""
+
+
+def test_parse_benchmark_contract_extracts_policy_tools_and_messages():
+    contract = purple_agent.parse_benchmark_contract(sample_tau2_prompt())
+
+    assert "Never change plans" in contract.policy
+    assert contract.tool_names == ["lookup_account"]
+    assert contract.initial_user_messages == ["I want to change my mobile plan today."]
+
+
+@pytest.mark.asyncio
+async def test_agent_returns_clarification_action_for_ambiguous_request(monkeypatch):
+    async def fake_call_llm_with_retry(**kwargs):
+        return FakeResponse(
+            json.dumps(
+                {
+                    "mode": "clarify",
+                    "reasoning_summary": "Need account verification before plan changes.",
+                    "policy_assessment": {
+                        "status": "uncertain",
+                        "reason": "Missing verified account identifier.",
+                    },
+                    "selected_action": {
+                        "name": "respond",
+                        "arguments": {
+                            "content": "Please confirm the phone number on the account before I proceed."
+                        },
+                    },
+                    "reply_to_user": "Please confirm the phone number on the account before I proceed.",
+                    "state_update": {
+                        "pending_questions": ["What is the phone number on the account?"],
+                    },
+                    "confidence": 0.74,
+                }
+            )
+        )
+
+    monkeypatch.setattr(purple_agent, "call_llm_with_retry", fake_call_llm_with_retry)
+
+    agent = purple_agent.Agent()
+    updater = DummyUpdater()
+
+    await agent.run(make_message(sample_tau2_prompt()), updater)
+
+    payload = json.loads(updater.last_text())
+    assert payload["name"] == "respond"
+    assert "phone number" in payload["arguments"]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_blocks_policy_violating_tool_call(monkeypatch):
+    async def fake_call_llm_with_retry(**kwargs):
+        return FakeResponse(
+            json.dumps(
+                {
+                    "mode": "act",
+                    "reasoning_summary": "A tool exists, but policy blocks action before verification.",
+                    "policy_assessment": {
+                        "status": "blocked",
+                        "reason": "Identity verification is still missing.",
+                    },
+                    "selected_action": {
+                        "name": "lookup_account",
+                        "arguments": {"phone_number": "555-0100"},
+                    },
+                    "reply_to_user": "I need to verify your identity before I can make any account changes.",
+                    "state_update": {
+                        "blocked_reasons": ["identity_verification_missing"],
+                    },
+                    "confidence": 0.89,
+                }
+            )
+        )
+
+    monkeypatch.setattr(purple_agent, "call_llm_with_retry", fake_call_llm_with_retry)
+
+    agent = purple_agent.Agent()
+    updater = DummyUpdater()
+
+    await agent.run(make_message(sample_tau2_prompt()), updater)
+
+    payload = json.loads(updater.last_text())
+    assert payload["name"] == "respond"
+    assert "verify" in payload["arguments"]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_keeps_valid_tool_action(monkeypatch):
+    async def fake_call_llm_with_retry(**kwargs):
+        return FakeResponse(
+            json.dumps(
+                {
+                    "mode": "act",
+                    "reasoning_summary": "The verified phone number allows an account lookup.",
+                    "policy_assessment": {
+                        "status": "allowed",
+                        "reason": "Lookup is safe after verification.",
+                    },
+                    "selected_action": {
+                        "name": "lookup_account",
+                        "arguments": {"phone_number": "555-0100"},
+                    },
+                    "reply_to_user": "",
+                    "state_update": {
+                        "confirmed_facts": ["Customer confirmed phone number 555-0100."],
+                    },
+                    "confidence": 0.93,
+                }
+            )
+        )
+
+    monkeypatch.setattr(purple_agent, "call_llm_with_retry", fake_call_llm_with_retry)
+
+    agent = purple_agent.Agent()
+    updater = DummyUpdater()
+
+    await agent.run(
+        make_message(
+            sample_tau2_prompt().rstrip() + "\nCustomer already confirmed the phone number is 555-0100.\n"
+        ),
+        updater,
+    )
+
+    payload = json.loads(updater.last_text())
+    assert payload["name"] == "lookup_account"
+    assert payload["arguments"] == {"phone_number": "555-0100"}
+
+
+@pytest.mark.asyncio
+async def test_agent_falls_back_to_safe_response_on_invalid_controller_output(monkeypatch):
+    async def fake_call_llm_with_retry(**kwargs):
+        return FakeResponse("not valid json")
+
+    monkeypatch.setattr(purple_agent, "call_llm_with_retry", fake_call_llm_with_retry)
+
+    agent = purple_agent.Agent()
+    updater = DummyUpdater()
+
+    await agent.run(make_message(sample_tau2_prompt()), updater)
+
+    payload = json.loads(updater.last_text())
+    assert payload["name"] == "respond"
+    assert "internal issue" in payload["arguments"]["content"].lower()
