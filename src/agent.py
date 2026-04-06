@@ -33,18 +33,36 @@ FAILURE_MESSAGE = (
 )
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_OUTPUT_TOKENS = 600
+RECENT_TRANSCRIPT_LIMIT = 16
 
 CONTROLLER_PROMPT = """You are a tau2-bench purple-agent controller.
 
-Choose exactly one next action for the current turn.
+Choose exactly one safe next action for the current turn.
+
+Workflow:
+- Identify the user's real goal and the specific object involved.
+- Re-read the provided policy and tool schema before deciding.
+- Use tools to verify facts when the action depends on system data.
+- If required consent, verification, or identifiers are missing, ask a short clarification question instead of acting.
+- Once all policy conditions are satisfied and the next tool call is clear, take that action immediately.
+
+Common mistakes to avoid:
+- Do not claim that any tool action succeeded unless the transcript explicitly proves it.
+- Do not invent policy rules, exceptions, ids, or completed actions.
+- Do not ask the user for internal identifiers or information that should be obtained via tools.
+- Do not delay with extra explanation once the correct next tool call is clear.
+- Do not offer disallowed workarounds when the policy blocks the request.
+
+Efficiency rules:
+- Prefer one decisive next step over broad exploration.
+- Ask only for details that the user can realistically provide.
+- If there is exactly one safe next tool call, emit it directly.
+
 Return a single JSON object with this structure:
 {
   "mode": "clarify" | "act" | "finalize",
-  "reasoning_summary": "short explanation",
-  "policy_assessment": {
-    "status": "allowed" | "blocked" | "uncertain",
-    "reason": "short explanation"
-  },
+  "policy_status": "allowed" | "blocked" | "uncertain",
+  "policy_reason": "short explanation",
   "selected_action": {
     "name": "tool_name_or_respond",
     "arguments": {}
@@ -55,8 +73,7 @@ Return a single JSON object with this structure:
     "pending_questions": ["question"],
     "completed_actions": ["completed action proven by transcript"],
     "blocked_reasons": ["reason"]
-  },
-  "confidence": 0.0
+  }
 }
 
 Rules:
@@ -78,11 +95,8 @@ If some fields are missing, infer the safest values.
 The JSON object must use this structure:
 {
   "mode": "clarify" | "act" | "finalize",
-  "reasoning_summary": "short explanation",
-  "policy_assessment": {
-    "status": "allowed" | "blocked" | "uncertain",
-    "reason": "short explanation"
-  },
+  "policy_status": "allowed" | "blocked" | "uncertain",
+  "policy_reason": "short explanation",
   "selected_action": {
     "name": "tool_name_or_respond",
     "arguments": {}
@@ -93,8 +107,7 @@ The JSON object must use this structure:
     "pending_questions": ["question"],
     "completed_actions": ["completed action proven by transcript"],
     "blocked_reasons": ["reason"]
-  },
-  "confidence": 0.0
+  }
 }
 """
 
@@ -232,6 +245,12 @@ def build_controller_messages(state: ConversationState, current_input: str) -> l
             "tools": state.contract.tools,
             "response_action_name": RESPOND_ACTION_NAME,
         },
+        "decision_reminders": [
+            "Follow the provided policy exactly.",
+            "Use one safe next action only.",
+            "Clarify before acting when required details are missing.",
+            "Do not claim success for tool actions that have not happened yet.",
+        ],
         "state": {
             "turn_count": state.turn_count,
             "confirmed_facts": state.confirmed_facts,
@@ -239,7 +258,7 @@ def build_controller_messages(state: ConversationState, current_input: str) -> l
             "completed_actions": state.completed_actions,
             "blocked_reasons": state.blocked_reasons,
         },
-        "recent_transcript": state.transcript[-10:],
+        "recent_transcript": state.transcript[-RECENT_TRANSCRIPT_LIMIT:],
         "current_input": current_input,
     }
     return [
@@ -401,9 +420,13 @@ def normalize_controller_output(
     if mode not in {"clarify", "act", "finalize"}:
         mode = "clarify"
 
-    policy_status = policy_assessment.get("status", "uncertain")
+    policy_status = controller_output.get("policy_status", policy_assessment.get("status", "uncertain"))
     if policy_status not in {"allowed", "blocked", "uncertain"}:
         policy_status = "uncertain"
+
+    policy_reason = controller_output.get("policy_reason", policy_assessment.get("reason", ""))
+    if not isinstance(policy_reason, str):
+        policy_reason = ""
 
     action_name = selected_action.get("name")
     action_args = selected_action.get("arguments")
@@ -447,7 +470,7 @@ def normalize_controller_output(
         "mode": mode,
         "reasoning_summary": str(controller_output.get("reasoning_summary", "")),
         "policy_status": policy_status,
-        "policy_reason": str(policy_assessment.get("reason", "")),
+        "policy_reason": policy_reason,
         "state_update": state_update,
         "confidence": max(0.0, min(confidence, 1.0)),
         "final_action": final_action,
