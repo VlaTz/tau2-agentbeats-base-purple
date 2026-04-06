@@ -413,9 +413,66 @@ async def test_agent_keeps_valid_tool_action(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_falls_back_to_safe_response_on_invalid_controller_output(monkeypatch):
+async def test_agent_repairs_invalid_controller_output(monkeypatch):
+    responses = iter(
+        [
+            FakeResponse("not valid json"),
+            FakeResponse(
+                json.dumps(
+                    {
+                        "mode": "clarify",
+                        "reasoning_summary": "Repair step recovered a valid clarification.",
+                        "policy_assessment": {
+                            "status": "uncertain",
+                            "reason": "The prior output was malformed, so the safe action is to clarify.",
+                        },
+                        "selected_action": {
+                            "name": "respond",
+                            "arguments": {
+                                "content": "Please confirm the phone number on the account before I proceed."
+                            },
+                        },
+                        "reply_to_user": "Please confirm the phone number on the account before I proceed.",
+                        "state_update": {
+                            "pending_questions": ["What is the phone number on the account?"],
+                        },
+                        "confidence": 0.61,
+                    }
+                )
+            ),
+        ]
+    )
+    seen_messages = []
+
     async def fake_call_llm_with_retry(**kwargs):
-        return FakeResponse("not valid json")
+        seen_messages.append(kwargs["messages"])
+        return next(responses)
+
+    monkeypatch.setattr(purple_agent, "call_llm_with_retry", fake_call_llm_with_retry)
+
+    agent = purple_agent.Agent()
+    updater = DummyUpdater()
+
+    await agent.run(make_message(sample_tau2_prompt()), updater)
+
+    payload = json.loads(updater.last_text())
+    assert payload["name"] == "respond"
+    assert "phone number" in payload["arguments"]["content"].lower()
+    assert len(seen_messages) == 2
+    assert "malformed_controller_output" in seen_messages[1][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_falls_back_to_safe_response_on_invalid_controller_output(monkeypatch):
+    responses = iter(
+        [
+            FakeResponse("not valid json"),
+            FakeResponse("still not valid json"),
+        ]
+    )
+
+    async def fake_call_llm_with_retry(**kwargs):
+        return next(responses)
 
     monkeypatch.setattr(purple_agent, "call_llm_with_retry", fake_call_llm_with_retry)
 

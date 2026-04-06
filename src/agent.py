@@ -70,6 +70,34 @@ Rules:
 - When the task is already solved, use mode="finalize" with selected_action.name="respond".
 """
 
+CONTROLLER_REPAIR_PROMPT = """You repair malformed controller outputs.
+
+Return exactly one JSON object and nothing else.
+Preserve the original intent when possible.
+If some fields are missing, infer the safest values.
+The JSON object must use this structure:
+{
+  "mode": "clarify" | "act" | "finalize",
+  "reasoning_summary": "short explanation",
+  "policy_assessment": {
+    "status": "allowed" | "blocked" | "uncertain",
+    "reason": "short explanation"
+  },
+  "selected_action": {
+    "name": "tool_name_or_respond",
+    "arguments": {}
+  },
+  "reply_to_user": "short user-facing message when selected_action.name is respond",
+  "state_update": {
+    "confirmed_facts": ["fact"],
+    "pending_questions": ["question"],
+    "completed_actions": ["completed action proven by transcript"],
+    "blocked_reasons": ["reason"]
+  },
+  "confidence": 0.0
+}
+"""
+
 RETRYABLE_EXCEPTIONS = (
     APIConnectionError,
     APITimeoutError,
@@ -220,6 +248,20 @@ def build_controller_messages(state: ConversationState, current_input: str) -> l
     ]
 
 
+def build_controller_repair_messages(raw_content: str) -> list[dict[str, str]]:
+    payload = {
+        "malformed_controller_output": raw_content,
+        "instructions": (
+            "Repair the malformed output into one valid JSON object that matches the required schema. "
+            "Return JSON only."
+        ),
+    }
+    return [
+        {"role": "system", "content": CONTROLLER_REPAIR_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=True, indent=2)},
+    ]
+
+
 def create_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -303,6 +345,37 @@ def parse_controller_output(raw_content: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError(f"Expected JSON object, got {type(parsed)}")
     return parsed
+
+
+async def parse_or_repair_controller_output(
+    *,
+    raw_content: str,
+    model: str,
+    temperature: float | None,
+    reasoning_effort: str | None,
+    max_output_tokens: int | None,
+    max_retries: int,
+    backoff_base: int,
+) -> dict[str, Any]:
+    try:
+        return parse_controller_output(raw_content)
+    except (json.JSONDecodeError, ValueError) as initial_error:
+        logger.warning(
+            "Primary controller output was not valid JSON (%s). Trying repair step.",
+            type(initial_error).__name__,
+        )
+        repair_response = await call_llm_with_retry(
+            messages=build_controller_repair_messages(raw_content),
+            model=model,
+            response_format={"type": "json_object"},
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            max_retries=max_retries,
+            backoff_base=backoff_base,
+        )
+        repaired_content = repair_response.choices[0].message.content or ""
+        return parse_controller_output(repaired_content)
 
 
 def normalize_controller_output(
@@ -479,7 +552,15 @@ class Agent:
                 backoff_base=self.backoff_base,
             )
             raw_content = response.choices[0].message.content or ""
-            controller_output = parse_controller_output(raw_content)
+            controller_output = await parse_or_repair_controller_output(
+                raw_content=raw_content,
+                model=self.model,
+                temperature=self.temperature,
+                reasoning_effort=self.reasoning_effort,
+                max_output_tokens=self.max_output_tokens,
+                max_retries=self.max_retries,
+                backoff_base=self.backoff_base,
+            )
             normalized_output = normalize_controller_output(controller_output, state)
         except Exception as error:
             logger.error("Controller failed: %s: %s", type(error).__name__, error)
