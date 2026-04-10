@@ -294,6 +294,23 @@ def test_parse_benchmark_contract_extracts_policy_tools_and_messages():
     assert contract.initial_user_messages == ["I want to change my mobile plan today."]
 
 
+def test_get_domain_hints_telecom_from_sample_policy():
+    contract = purple_agent.parse_benchmark_contract(sample_tau2_prompt())
+    hints = purple_agent.get_domain_hints(contract.policy)
+    assert "telecom" in hints.lower()
+    assert "roaming" in hints.lower()
+
+
+def test_build_controller_messages_includes_domain_hints():
+    state = purple_agent.ConversationState(context_id="ctx")
+    state.contract.policy = "Retail Agent Policy — handle orders carefully."
+    msgs = purple_agent.build_controller_messages(state, "Hello")
+    outer = json.loads(msgs[1]["content"])
+    assert "domain_hints" in outer
+    assert "retail" in outer["domain_hints"].lower()
+    assert "authentication" in outer["domain_hints"].lower()
+
+
 @pytest.mark.asyncio
 async def test_agent_returns_clarification_action_for_ambiguous_request(monkeypatch):
     async def fake_call_llm_with_retry(**kwargs):

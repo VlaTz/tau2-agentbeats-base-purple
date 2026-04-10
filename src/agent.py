@@ -39,9 +39,13 @@ CONTROLLER_PROMPT = """You are a tau2-bench purple-agent controller.
 
 Choose exactly one safe next action for the current turn.
 
+Priority:
+- Read `domain_hints` in the user JSON first when it applies to this scenario (typical tau2 edge cases).
+- Then follow the scenario policy in `contract.policy` and the tools in `contract.tools`. If `domain_hints` and the scenario policy conflict, the scenario policy wins.
+
 Workflow:
 - Identify the user's real goal and the specific object involved.
-- Re-read the provided policy and tool schema before deciding.
+- Re-read domain_hints, the provided policy, and tool schema before deciding.
 - Use tools to verify facts when the action depends on system data.
 - If required consent, verification, or identifiers are missing, ask a short clarification question instead of acting.
 - Once all policy conditions are satisfied and the next tool call is clear, take that action immediately.
@@ -110,6 +114,72 @@ The JSON object must use this structure:
   }
 }
 """
+
+DOMAIN_HINTS_AIRLINE = """
+Tau2 airline domain — common edge cases (apply when relevant; scenario policy wins if conflict):
+
+- Cabin vs itinerary: policy often allows ALL reservations (including basic economy) to change cabin without changing flights. "Cannot modify basic economy" usually means itinerary/date/flight-number changes, NOT cabin upgrades/downgrades.
+- Cabin must match across ALL segments and ALL passengers; refuse split-cabin or per-leg-only changes; explain clearly.
+- Origin and destination cities cannot be changed — offer cancel + rebook if user wants different O/D.
+- Transfer to human only when truly outside tools; membership disputes or frustration are not automatic transfers — verify records first.
+- Cancellation: only when policy allows (e.g. 24h booking, airline-cancelled flight, business class, or insurance+health/weather as policy states). Past flights cannot be cancelled. Multiple reservations: check each.
+- Payments: flight changes often need ONE gift card OR credit card; certificates may be invalid for flight changes; for new bookings follow policy on mixing methods.
+- Pricing cabin changes: use flight search tools for new cabin prices across all passengers/segments; compare to paid amount; do not use flight status for prices.
+- Free bags: use membership + cabin rules from policy; extra bags per policy pricing.
+- Cheapest economy vs basic economy are different; search direct then one-stop as needed.
+- Multi-reservation: get user details for all ids, then each reservation details; evaluate separately.
+""".strip()
+
+DOMAIN_HINTS_RETAIL = """
+Tau2 retail domain — common edge cases (apply when relevant; scenario policy wins if conflict):
+
+- Authentication: verify identity as policy requires (e.g. email or name+zip) before sensitive actions — even if user gives a user id.
+- modify_pending / exchange_delivered: often ONE call per order — gather ALL line items first; confirm with user before calling.
+- Return vs exchange: different tools; match user intent; exchange is same product type variant, not arbitrary product swaps.
+- Payment changes: single replacement method; gift card must cover full total if switching to it; refunds per policy (original method or existing gift card).
+- Cancel: only pending orders; allowed reasons per policy (e.g. mistake / no longer needed).
+- Multi-order: get_order_details per order; check pending vs delivered before choosing cancel vs return/exchange.
+- Totals across orders: use calculate tool when available instead of mental math.
+""".strip()
+
+DOMAIN_HINTS_TELECOM = """
+Tau2 telecom domain — common edge cases (apply when relevant; scenario policy wins if conflict):
+
+- Identify customer before actions (phone, id, or name+dob per policy).
+- Technical support: follow troubleshooting order; try relevant steps before escalating.
+- Roaming: "enable" account permission vs "toggle" on device may be different tools — use both when policy requires.
+- Data refuel: max per request and confirm price before applying.
+- Suspension: lift only when policy allows (e.g. bills paid); contract end date may block resume even after payment.
+- Overdue bills: follow policy flow (request → user confirms → pay → verify paid).
+- Plan changes: list options, confirm price, then apply.
+""".strip()
+
+DOMAIN_HINTS_DEFAULT = """
+General tau2 discipline (apply when relevant; scenario policy wins if conflict):
+
+- Escalate to human only when truly outside tools; if policy forbids an action, deny clearly.
+- Verify with tools before asserting facts or confirming success.
+- Confirm destructive or irreversible steps with the user when policy requires.
+""".strip()
+
+
+def get_domain_hints(policy_text: str) -> str:
+    """Select compact domain hints from policy text (tau2-bench style)."""
+    text_lower = (policy_text or "").lower()
+    if "airline agent policy" in text_lower or "airline agent" in text_lower:
+        return DOMAIN_HINTS_AIRLINE
+    if "retail agent policy" in text_lower or "retail agent" in text_lower:
+        return DOMAIN_HINTS_RETAIL
+    if "telecom agent policy" in text_lower or "telecom agent" in text_lower:
+        return DOMAIN_HINTS_TELECOM
+    if "airline" in text_lower and "policy" in text_lower:
+        return DOMAIN_HINTS_AIRLINE
+    if "retail" in text_lower and "policy" in text_lower:
+        return DOMAIN_HINTS_RETAIL
+    if "telecom" in text_lower:
+        return DOMAIN_HINTS_TELECOM
+    return DOMAIN_HINTS_DEFAULT
+
 
 RETRYABLE_EXCEPTIONS = (
     APIConnectionError,
@@ -239,6 +309,7 @@ def _looks_like_initial_tau2_prompt(user_input: str) -> bool:
 
 def build_controller_messages(state: ConversationState, current_input: str) -> list[dict[str, str]]:
     payload = {
+        "domain_hints": get_domain_hints(state.contract.policy),
         "contract": {
             "policy": state.contract.policy,
             "available_tool_names": state.contract.tool_names,
