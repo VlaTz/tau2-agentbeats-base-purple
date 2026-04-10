@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 from uuid import uuid4
 
 import httpx
@@ -17,7 +19,10 @@ from a2a.types import (
 )
 
 
-DEFAULT_TIMEOUT = 300
+logger = logging.getLogger(__name__)
+
+# Green → purple A2A call must outlive one LLM generation on the purple side.
+DEFAULT_TIMEOUT = int(os.getenv("MESSENGER_HTTP_TIMEOUT", "600"))
 
 
 def create_message(
@@ -121,8 +126,21 @@ class Messenger:
             context_id=None if new_conversation else self._context_ids.get(url, None),
             timeout=timeout,
         )
-        if outputs.get("status", "completed") != "completed":
-            raise RuntimeError(f"{url} responded with: {outputs}")
+        status = outputs.get("status", "completed")
+        if status != "completed":
+            # Log explicitly — UI often truncates exception messages; this line is enough to debug.
+            response_preview = (outputs.get("response") or "")[:800]
+            logger.error(
+                "A2A task did not complete: url=%s status=%s response_preview=%r full_outputs=%r",
+                url,
+                status,
+                response_preview,
+                outputs,
+            )
+            raise RuntimeError(
+                f"A2A task status={status!r} (need 'completed') url={url!r} "
+                f"response_preview={response_preview!r} outputs={outputs!r}"
+            )
         self._context_ids[url] = outputs.get("context_id", None)
         return outputs["response"]
 

@@ -352,13 +352,22 @@ def build_controller_repair_messages(raw_content: str) -> list[dict[str, str]]:
     ]
 
 
+def _openai_http_timeout_seconds() -> float:
+    """Max wait for a single chat.completions call (slow OSS / long prompts)."""
+    raw = os.getenv("AGENT_LLM_HTTP_TIMEOUT", "").strip()
+    if raw:
+        return float(raw)
+    return 600.0
+
+
 def create_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required for the configured OpenAI-compatible provider")
 
     base_url = os.getenv("OPENAI_API_BASE", "").strip() or None
-    return OpenAI(api_key=api_key, base_url=base_url)
+    timeout = _openai_http_timeout_seconds()
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
 
 def request_openai_completion(
@@ -597,9 +606,10 @@ class Agent:
 
         logger.info("Purple agent initialized with model: %s", self.model)
         logger.info(
-            "Retry config: max_retries=%s, backoff_base=%s",
+            "Retry config: max_retries=%s, backoff_base=%s, llm_http_timeout_s=%s",
             self.max_retries,
             self.backoff_base,
+            _openai_http_timeout_seconds(),
         )
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
