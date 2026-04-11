@@ -33,7 +33,95 @@ FAILURE_MESSAGE = (
 )
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_OUTPUT_TOKENS = 600
-RECENT_TRANSCRIPT_LIMIT = 16
+
+# Tau2 prompts can exceed model context; cap what we send to the LLM (chars ≈ rough budget).
+def _context_int(env: str, default: int) -> int:
+    raw = os.getenv(env, "").strip()
+    if raw:
+        try:
+            return max(256, int(raw))
+        except ValueError:
+            pass
+    return default
+
+
+def _truncate_text(text: str, max_chars: int, label: str) -> str:
+    if not text or len(text) <= max_chars:
+        return text
+    keep = max_chars - min(100, max_chars // 8)
+    return text[:keep] + f"\n...[truncated {label}, dropped {len(text) - keep} chars]"
+
+
+def _shrink_tool_for_context(tool: dict[str, Any]) -> dict[str, Any]:
+    """Drop huge JSON Schemas from tool definitions while keeping name + short description."""
+    if not isinstance(tool, dict):
+        return tool
+    out = json.loads(json.dumps(tool, ensure_ascii=True))
+    fn = out.get("function")
+    if not isinstance(fn, dict):
+        return out
+    fn = dict(fn)
+    desc = fn.get("description")
+    if isinstance(desc, str) and len(desc) > 2000:
+        fn["description"] = desc[:2000] + "...(truncated)"
+    params = fn.get("parameters")
+    if params is not None:
+        ps = json.dumps(params, ensure_ascii=True, separators=(",", ":"))
+        if len(ps) > 5000:
+            fn["parameters"] = {
+                "type": "object",
+                "description": "Schema omitted in controller context (too long); use tool name and policy.",
+            }
+    out["function"] = fn
+    return out
+
+
+def _tools_for_llm_payload(
+    tools: list[dict[str, Any]],
+    tool_names: list[str],
+    max_serialized_chars: int,
+) -> Any:
+    """Return tools JSON within a character budget; fall back to names-only."""
+    if not tools:
+        return []
+
+    def ser(obj: Any) -> str:
+        return json.dumps(obj, ensure_ascii=True, separators=(",", ":"))
+
+    if len(ser(tools)) <= max_serialized_chars:
+        return tools
+
+    shrunk = [_shrink_tool_for_context(t) for t in tools if isinstance(t, dict)]
+    if len(ser(shrunk)) <= max_serialized_chars:
+        logger.warning(
+            "Tool schemas shrunk for context budget (%s chars max)",
+            max_serialized_chars,
+        )
+        return shrunk
+
+    return {
+        "tools_truncated": True,
+        "available_tool_names": tool_names,
+        "note": "Full schemas omitted due to size; use names and contract.policy.",
+    }
+
+
+def _transcript_for_llm(
+    transcript: list[dict[str, str]],
+    *,
+    max_turns: int,
+    per_message_chars: int,
+) -> list[dict[str, str]]:
+    slice_ = transcript[-max_turns:] if max_turns > 0 else transcript
+    out: list[dict[str, str]] = []
+    for m in slice_:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        content = _truncate_text(content, per_message_chars, "transcript_line")
+        out.append({"role": role, "content": content})
+    return out
 
 CONTROLLER_PROMPT = """You are a tau2-bench purple-agent controller.
 
@@ -308,12 +396,29 @@ def _looks_like_initial_tau2_prompt(user_input: str) -> bool:
 
 
 def build_controller_messages(state: ConversationState, current_input: str) -> list[dict[str, str]]:
-    payload = {
-        "domain_hints": get_domain_hints(state.contract.policy),
+    policy_max = _context_int("AGENT_CONTEXT_POLICY_MAX_CHARS", 45000)
+    tools_max = _context_int("AGENT_CONTEXT_TOOLS_MAX_CHARS", 70000)
+    turns = _context_int("AGENT_CONTEXT_TRANSCRIPT_TURNS", 6)
+    msg_max = _context_int("AGENT_CONTEXT_MESSAGE_MAX_CHARS", 8000)
+    hints_max = _context_int("AGENT_CONTEXT_DOMAIN_HINTS_MAX_CHARS", 12000)
+    user_json_max = _context_int("AGENT_CONTEXT_USER_JSON_MAX_CHARS", 260000)
+
+    policy = _truncate_text(state.contract.policy, policy_max, "policy")
+    hints = _truncate_text(get_domain_hints(state.contract.policy), hints_max, "domain_hints")
+    tools_payload = _tools_for_llm_payload(
+        state.contract.tools, state.contract.tool_names, tools_max
+    )
+    current = _truncate_text(current_input, msg_max, "current_input")
+    recent = _transcript_for_llm(
+        state.transcript, max_turns=turns, per_message_chars=msg_max
+    )
+
+    payload: dict[str, Any] = {
+        "domain_hints": hints,
         "contract": {
-            "policy": state.contract.policy,
+            "policy": policy,
             "available_tool_names": state.contract.tool_names,
-            "tools": state.contract.tools,
+            "tools": tools_payload,
             "response_action_name": RESPOND_ACTION_NAME,
         },
         "decision_reminders": [
@@ -329,18 +434,37 @@ def build_controller_messages(state: ConversationState, current_input: str) -> l
             "completed_actions": state.completed_actions,
             "blocked_reasons": state.blocked_reasons,
         },
-        "recent_transcript": state.transcript[-RECENT_TRANSCRIPT_LIMIT:],
-        "current_input": current_input,
+        "recent_transcript": recent,
+        "current_input": current,
     }
+    user_content = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+    if len(user_content) > user_json_max:
+        logger.warning(
+            "Controller user JSON still %s chars (max %s); applying emergency truncation",
+            len(user_content),
+            user_json_max,
+        )
+        payload["contract"]["policy"] = _truncate_text(
+            str(payload["contract"]["policy"]), max(8000, policy_max // 2), "policy"
+        )
+        if isinstance(payload["contract"]["tools"], list):
+            payload["contract"]["tools"] = _tools_for_llm_payload(
+                state.contract.tools, state.contract.tool_names, tools_max // 2
+            )
+        user_content = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
     return [
         {"role": "system", "content": CONTROLLER_PROMPT},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=True, indent=2)},
+        {"role": "user", "content": user_content},
     ]
 
 
 def build_controller_repair_messages(raw_content: str) -> list[dict[str, str]]:
+    repair_in_max = _context_int("AGENT_CONTEXT_REPAIR_INPUT_MAX_CHARS", 24000)
+    clipped = _truncate_text(raw_content, repair_in_max, "malformed_controller_output")
     payload = {
-        "malformed_controller_output": raw_content,
+        "malformed_controller_output": clipped,
         "instructions": (
             "Repair the malformed output into one valid JSON object that matches the required schema. "
             "Return JSON only."
@@ -348,7 +472,7 @@ def build_controller_repair_messages(raw_content: str) -> list[dict[str, str]]:
     }
     return [
         {"role": "system", "content": CONTROLLER_REPAIR_PROMPT},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=True, indent=2)},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=True, separators=(",", ":"))},
     ]
 
 
