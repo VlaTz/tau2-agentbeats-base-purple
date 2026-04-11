@@ -361,13 +361,30 @@ def _openai_http_timeout_seconds() -> float:
 
 
 def create_openai_client() -> OpenAI:
-    api_key = os.getenv("OPENAI_API_KEY")
+    # Strip: secrets often pick up trailing newlines; breaks auth in subtle ways.
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required for the configured OpenAI-compatible provider")
 
     base_url = os.getenv("OPENAI_API_BASE", "").strip() or None
     timeout = _openai_http_timeout_seconds()
-    return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+
+    # OpenAI: project-scoped keys (sk-proj-...) and some org setups need explicit project / org headers.
+    # Without OPENAI_PROJECT, you may get 401 missing_scope: model.request even when the key "works" elsewhere.
+    organization = (os.getenv("OPENAI_ORGANIZATION") or os.getenv("OPENAI_ORG_ID") or "").strip() or None
+    project = (os.getenv("OPENAI_PROJECT") or os.getenv("OPENAI_PROJECT_ID") or "").strip() or None
+
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "base_url": base_url,
+        "timeout": timeout,
+    }
+    if organization:
+        client_kwargs["organization"] = organization
+    if project:
+        client_kwargs["project"] = project
+
+    return OpenAI(**client_kwargs)
 
 
 def request_openai_completion(
