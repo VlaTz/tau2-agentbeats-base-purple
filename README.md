@@ -37,9 +37,8 @@ For a concrete example of implementing an agent using this template, see this [d
 
 | Environment Variable | Default | Description |
 |---|---|---|
-| `AGENT_LLM` | `openai/gpt-4o-mini` | Model name for an OpenAI-compatible provider. Both `openai/gpt-4o-mini` and raw model IDs are accepted. |
-| `OPENAI_API_BASE` | empty | Optional OpenAI-compatible base URL, useful for providers like NVIDIA |
-| `OPENAI_API_KEY` | — | Required if using OpenAI models |
+| `AGENT_LLM` | `openai/gpt-4o-mini` | Model name. Both `openai/gpt-4o-mini` and raw model IDs are accepted. |
+| `OPENAI_API_KEY` | — | Required; requests use the OpenAI API default host (`https://api.openai.com/v1`). |
 
 ## Agent Behavior
 
@@ -77,15 +76,6 @@ AGENT_LLM=openai/gpt-4o-mini OPENAI_API_KEY=sk-... uv run src/server.py
 
 You can also use a local `.env` file. `src/server.py` now calls `load_dotenv()`, so gitignored secrets are loaded automatically on startup.
 
-Example for an OpenAI-compatible NVIDIA endpoint:
-
-```bash
-AGENT_LLM=openai/gpt-oss-120b \
-OPENAI_API_BASE=https://integrate.api.nvidia.com/v1 \
-OPENAI_API_KEY=nvapi-... \
-uv run src/server.py
-```
-
 ## Running with Docker
 
 ```bash
@@ -119,7 +109,6 @@ To submit via quick-submit, use the form on the green agent's [AgentBeats page](
 For this repo's purple-agent manifest, the only external runtime fields you need in Quick Submit are:
 
 - `AGENT_LLM`
-- `OPENAI_API_BASE`
 - `OPENAI_API_KEY`
 
 ## Testing
