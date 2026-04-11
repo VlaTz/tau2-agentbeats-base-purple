@@ -707,8 +707,13 @@ def apply_state_update(
     )
 
     if normalized_output["mode"] == "clarify":
-        response_text = normalized_output["final_action"]["arguments"]["content"]
-        _remember_items(state.pending_questions, [response_text], limit=6)
+        fa = normalized_output.get("final_action") or {}
+        args = fa.get("arguments") if isinstance(fa.get("arguments"), dict) else {}
+        # Only respond actions have content; clarify + tool call has no "content" key.
+        if fa.get("name") == RESPOND_ACTION_NAME:
+            response_text = args.get("content") or ""
+            if response_text:
+                _remember_items(state.pending_questions, [response_text], limit=6)
 
     state.transcript.append({"role": "assistant", "content": assistant_content})
     if len(state.transcript) > 20:
