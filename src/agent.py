@@ -491,8 +491,8 @@ def create_openai_client() -> OpenAI:
         raise RuntimeError("OPENAI_API_KEY is required")
 
     timeout = _openai_http_timeout_seconds()
-    # No base_url: use OpenAI SDK default (https://api.openai.com/v1).
-    return OpenAI(api_key=api_key, timeout=timeout)
+    base_url = (os.getenv("OPENAI_API_BASE") or "").strip() or None
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
 
 def request_openai_completion(

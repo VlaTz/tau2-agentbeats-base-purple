@@ -38,7 +38,8 @@ For a concrete example of implementing an agent using this template, see this [d
 | Environment Variable | Default | Description |
 |---|---|---|
 | `AGENT_LLM` | `openai/gpt-4o-mini` | Model name. Both `openai/gpt-4o-mini` and raw model IDs are accepted. |
-| `OPENAI_API_KEY` | — | Required; requests use the OpenAI API default host (`https://api.openai.com/v1`). |
+| `OPENAI_API_BASE` | empty | Optional OpenAI-compatible API base URL (e.g. `https://api.openai.com/v1` or another provider). If empty, the SDK default is used. |
+| `OPENAI_API_KEY` | — | Required. |
 
 ## Agent Behavior
 
@@ -109,6 +110,7 @@ To submit via quick-submit, use the form on the green agent's [AgentBeats page](
 For this repo's purple-agent manifest, the only external runtime fields you need in Quick Submit are:
 
 - `AGENT_LLM`
+- `OPENAI_API_BASE` (optional)
 - `OPENAI_API_KEY`
 
 ## Testing
